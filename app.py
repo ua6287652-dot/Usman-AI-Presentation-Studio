@@ -57,8 +57,8 @@ def schema(n):
     return {"type":"object","additionalProperties":False,"properties":{
         "presentation_title":{"type":"string"},"subtitle":{"type":"string"},"overview":{"type":"string"},
         "slides":{"type":"array","minItems":n,"maxItems":n,"items":{"type":"object","additionalProperties":False,
-            "properties":{"title":{"type":"string"},"subtitle":{"type":"string"},"bullets":{"type":"array","minItems":2,"maxItems":6,"items":{"type":"string"}},"speaker_notes":{"type":"string"}},
-            "required":["title","subtitle","bullets","speaker_notes"]}},
+            "properties":{"title":{"type":"string"},"subtitle":{"type":"string"},"bullets":{"type":"array","minItems":2,"maxItems":6,"items":{"type":"string"}},"explanation":{"type":"string"},"speaker_notes":{"type":"string"}},
+            "required":["title","subtitle","bullets","explanation","speaker_notes"]}},
     },"required":["presentation_title","subtitle","overview","slides"]}
 
 
@@ -67,7 +67,7 @@ def generate(topic, language, count, ptype, audience, theme, extra):
     key=api_key()
     if not key: raise RuntimeError("GROQ_API_KEY is missing. Add it in Streamlit Cloud → Settings → Secrets.")
     client=Groq(api_key=key)
-    prompt=f"""Create a professional presentation. Topic: {topic}. Language: {language}. Total PowerPoint slides including the title slide: {count}. The AI content slides to generate are exactly {content_count}. Type: {ptype}. Audience: {audience}. Visual theme: {theme}. Extra instructions: {extra or 'None'}. Return exactly {content_count} content slides. The application will use the first slide as the title slide, so the final PowerPoint must contain exactly {count} slides. Make the flow logical from introduction/context through main content to conclusion. Every slide needs a concise title, optional subtitle, 2-6 useful bullets, and speaker notes. Keep bullets concise enough for PowerPoint. Adapt depth to the audience. Use the requested language. Do not invent statistics, citations, or sources. Do not use markdown fences."""
+    prompt=f"""Create a professional presentation. Topic: {topic}. Language: {language}. Total PowerPoint slides including the title slide: {count}. The AI content slides to generate are exactly {content_count}. Type: {ptype}. Audience: {audience}. Visual theme: {theme}. Extra instructions: {extra or 'None'}. Return exactly {content_count} content slides. The application will use the first slide as the title slide, so the final PowerPoint must contain exactly {count} slides. Make the flow logical from introduction/context through main content to conclusion. Every slide needs a concise title, optional subtitle, 2-6 useful bullets, a clear 2-4 sentence explanation that expands on the main points, and speaker notes. Keep bullets concise enough for PowerPoint. The explanation must directly explain the slide topic and should add useful context, examples, or meaning rather than repeating the bullets. Adapt depth to the audience. Use the requested language. Do not invent statistics, citations, or sources. Do not use markdown fences."""
     res=client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -223,15 +223,25 @@ def make_ppt(data, theme_name, images: Optional[List[Optional[bytes]]] = None):
         if d.get("subtitle"):
             textbox(s, .97, 1.34, 7.0, .42, d["subtitle"], 11, False, th["accent2"])
 
-        # Content panel
+        # Content panel: main points + explanation
         card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.95), Inches(1.95), Inches(7.05), Inches(4.65))
         card.fill.solid(); card.fill.fore_color.rgb = rgb(th["card"]); card.line.fill.background()
-        y = 2.28
-        for bullet in d.get("bullets", [])[:6]:
-            dot = s.shapes.add_shape(MSO_SHAPE.OVAL, Inches(1.25), Inches(y+.06), Inches(.13), Inches(.13))
+        textbox(s, 1.25, 2.14, 6.2, .28, "MAIN POINTS", 9, True, th["accent2"])
+        bullets = d.get("bullets", [])[:6]
+        bullet_font = 13 if len(bullets) >= 5 else 14
+        y = 2.48
+        for bullet in bullets:
+            dot = s.shapes.add_shape(MSO_SHAPE.OVAL, Inches(1.25), Inches(y+.05), Inches(.11), Inches(.11))
             dot.fill.solid(); dot.fill.fore_color.rgb = rgb(th["accent"]); dot.line.fill.background()
-            textbox(s, 1.55, y, 6.05, .62, bullet, 15, False, th["text"])
-            y += .70
+            textbox(s, 1.50, y, 6.05, .48, bullet, bullet_font, False, th["text"])
+            y += .52 if len(bullets) >= 5 else .55
+
+        # Explanation section
+        exp_top = 5.48 if len(bullets) >= 5 else 5.35
+        exp_box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.18), Inches(exp_top), Inches(6.48), Inches(.88))
+        exp_box.fill.solid(); exp_box.fill.fore_color.rgb = rgb(th["panel"]); exp_box.line.color.rgb = rgb(th["accent2"])
+        textbox(s, 1.38, exp_top + .10, 1.35, .22, "EXPLANATION", 8, True, th["accent2"])
+        textbox(s, 1.38, exp_top + .31, 6.0, .48, d.get("explanation", ""), 10.5, False, th["muted"])
 
         # Topic-wise AI image
         image_index = num - 1
@@ -308,6 +318,8 @@ with right:
             for i,s in enumerate(d["slides"],1):
                 st.markdown(f"**Slide {i}: {s['title']}**")
                 for bullet in s["bullets"]: st.markdown(f"- {bullet}")
+                if s.get("explanation"):
+                    st.markdown(f"**Explanation:** {s['explanation']}")
         if st.session_state.images:
             with st.expander("🖼️ Preview Topic-wise AI Images", expanded=False):
                 for idx, image in enumerate(st.session_state.images, start=1):
