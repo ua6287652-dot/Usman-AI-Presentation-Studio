@@ -2,7 +2,10 @@ import io
 import json
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
+from urllib.parse import quote
+
+import requests
 
 import streamlit as st
 from groq import Groq
@@ -35,9 +38,19 @@ def rgb(v):
 
 
 def api_key():
-    try: key=st.secrets.get("GROQ_API_KEY","")
-    except Exception: key=""
-    return key or os.environ.get("GROQ_API_KEY","")
+    try:
+        key = st.secrets.get("GROQ_API_KEY", "")
+    except Exception:
+        key = ""
+    return key or os.environ.get("GROQ_API_KEY", "")
+
+
+def image_api_key():
+    try:
+        key = st.secrets.get("POLLINATIONS_API_KEY", "")
+    except Exception:
+        key = ""
+    return key or os.environ.get("POLLINATIONS_API_KEY", "")
 
 
 def schema(n):
@@ -73,6 +86,81 @@ def generate(topic, language, count, ptype, audience, theme, extra):
     return data
 
 
+def make_image_prompt(title: str, subtitle: str, bullets: List[str], topic: str, theme_name: str) -> str:
+    details = "; ".join(bullets[:4])
+    return (
+        f"Create a professional 16:9 presentation illustration about '{title}'. "
+        f"Overall topic: {topic}. Context: {subtitle}. Key ideas: {details}. "
+        f"Visual style: modern {theme_name} corporate editorial illustration, clean composition, "
+        "high quality, realistic or polished 3D visual, strong depth, professional lighting, "
+        "visually understandable for a presentation slide. No text, no letters, no words, "
+        "no logos, no watermark, no charts with labels."
+    )
+
+
+def generate_topic_image(prompt: str, width: int = 1024, height: int = 576) -> bytes:
+    key = image_api_key()
+    if not key:
+        raise RuntimeError(
+            "POLLINATIONS_API_KEY is missing. Add it in Streamlit Cloud → Settings → Secrets "
+            "to enable AI-generated slide images."
+        )
+    encoded = quote(prompt, safe="")
+    url = (
+        f"https://gen.pollinations.ai/image/{encoded}"
+        f"?model=flux&width={width}&height={height}&nologo=true&private=true&safe=true"
+    )
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=120,
+    )
+    response.raise_for_status()
+    content_type = response.headers.get("content-type", "")
+    if "image" not in content_type and not response.content.startswith(b"\xff\xd8") and not response.content.startswith(b"\x89PNG"):
+        raise RuntimeError("The image service did not return a valid image.")
+    return response.content
+
+
+def generate_all_images(data: Dict[str, Any], topic: str, theme_name: str) -> List[Optional[bytes]]:
+    images: List[Optional[bytes]] = []
+    total = len(data.get("slides", [])) + 1
+    progress = st.progress(0, text="Generating topic-wise AI images...")
+    errors = []
+
+    title_prompt = make_image_prompt(
+        data.get("presentation_title", topic),
+        data.get("subtitle", ""),
+        [data.get("overview", "")],
+        topic,
+        theme_name,
+    )
+    prompts = [title_prompt]
+    for slide in data.get("slides", []):
+        prompts.append(
+            make_image_prompt(
+                slide.get("title", ""),
+                slide.get("subtitle", ""),
+                slide.get("bullets", []),
+                topic,
+                theme_name,
+            )
+        )
+
+    for i, prompt in enumerate(prompts, start=1):
+        try:
+            images.append(generate_topic_image(prompt))
+        except Exception as exc:
+            images.append(None)
+            errors.append(f"Slide {i}: {exc}")
+        progress.progress(i / total, text=f"Generating AI image {i} of {total}...")
+
+    progress.empty()
+    if errors:
+        st.warning("Some slide images could not be generated. The PowerPoint was still created. " + " | ".join(errors[:3]))
+    return images
+
+
 def textbox(slide,l,t,w,h,text,size=20,bold=False,color="FFFFFF",align=PP_ALIGN.LEFT,valign=MSO_ANCHOR.TOP):
     sh=slide.shapes.add_textbox(Inches(l),Inches(t),Inches(w),Inches(h)); tf=sh.text_frame; tf.clear(); tf.word_wrap=True; tf.vertical_anchor=valign
     p=tf.paragraphs[0]; p.alignment=align; r=p.add_run(); r.text=str(text or ""); r.font.name="Aptos"; r.font.size=Pt(size); r.font.bold=bold; r.font.color.rgb=rgb(color)
@@ -90,31 +178,71 @@ def notes(slide,text):
         except Exception: pass
 
 
-def make_ppt(data,theme_name):
-    th=THEMES[theme_name]; prs=Presentation(); prs.slide_width=Inches(W); prs.slide_height=Inches(H)
-    s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s,th)
-    for x,y,w,h,c in [(9.3,.8,2.7,2.7,th["accent"]),(10.7,2.0,1.3,1.3,th["accent2"]),(8.7,5.0,3.8,.5,th["card"])]:
-        z=s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,Inches(x),Inches(y),Inches(w),Inches(h)); z.fill.solid(); z.fill.fore_color.rgb=rgb(c); z.line.fill.background()
-    textbox(s,.75,1.0,7.7,1.35,data["presentation_title"],34,True,th["text"])
-    textbox(s,.78,2.55,7.0,.7,data["subtitle"],18,False,th["accent2"])
-    textbox(s,.78,3.55,6.8,1.5,data["overview"],15,False,th["muted"])
-    textbox(s,.78,6.35,6.8,.3,"Created with Usman AI Presentation Studio",11,True,th["accent"])
-    notes(s,"Opening slide. Introduce the topic and explain what the audience will learn.")
-    total=len(data["slides"])+1
-    for num,d in enumerate(data["slides"],2):
-        s=prs.slides.add_slide(prs.slide_layouts[6]); bg(s,th)
-        line=s.shapes.add_shape(MSO_SHAPE.RECTANGLE,Inches(.62),Inches(1.0),Inches(.08),Inches(4.9)); line.fill.solid(); line.fill.fore_color.rgb=rgb(th["accent"]); line.line.fill.background()
-        textbox(s,.95,.72,11,.65,d["title"],28,True,th["text"])
-        if d.get("subtitle"): textbox(s,.97,1.38,10.8,.45,d["subtitle"],12,False,th["accent2"])
-        card=s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,Inches(.95),Inches(2.0),Inches(11.55),Inches(4.45)); card.fill.solid(); card.fill.fore_color.rgb=rgb(th["card"]); card.line.fill.background()
-        y=2.38
-        for bullet in d.get("bullets",[])[:6]:
-            dot=s.shapes.add_shape(MSO_SHAPE.OVAL,Inches(1.25),Inches(y+.06),Inches(.13),Inches(.13)); dot.fill.solid(); dot.fill.fore_color.rgb=rgb(th["accent"]); dot.line.fill.background()
-            textbox(s,1.55,y,10.25,.58,bullet,17,False,th["text"]); y+=.64
-        textbox(s,.65,7.05,10.7,.22,"Usman AI Presentation Studio",8,False,th["muted"])
-        textbox(s,11.65,7.02,1,.25,f"{num}/{total}",9,False,th["muted"],PP_ALIGN.RIGHT)
-        notes(s,d.get("speaker_notes",""))
-    out=io.BytesIO(); prs.save(out); return out.getvalue()
+def add_image_to_slide(slide, image_bytes: Optional[bytes], left: float, top: float, width: float, height: float, th: Dict[str, str]):
+    if image_bytes:
+        slide.shapes.add_picture(io.BytesIO(image_bytes), Inches(left), Inches(top), width=Inches(width), height=Inches(height))
+    else:
+        fallback = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE,
+            Inches(left), Inches(top), Inches(width), Inches(height)
+        )
+        fallback.fill.solid()
+        fallback.fill.fore_color.rgb = rgb(th["panel"])
+        fallback.line.color.rgb = rgb(th["accent"])
+        textbox(
+            slide, left + 0.25, top + height / 2 - 0.25, width - 0.5, 0.5,
+            "AI image unavailable", 12, True, th["muted"], PP_ALIGN.CENTER
+        )
+
+
+def make_ppt(data, theme_name, images: Optional[List[Optional[bytes]]] = None):
+    th = THEMES[theme_name]
+    prs = Presentation()
+    prs.slide_width = Inches(W)
+    prs.slide_height = Inches(H)
+    images = images or []
+
+    # Title slide
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    bg(s, th)
+    add_image_to_slide(s, images[0] if len(images) > 0 else None, 8.0, 0.85, 4.65, 5.75, th)
+    textbox(s, .75, 1.0, 6.7, 1.35, data["presentation_title"], 32, True, th["text"])
+    textbox(s, .78, 2.55, 6.45, .75, data["subtitle"], 18, False, th["accent2"])
+    textbox(s, .78, 3.55, 6.55, 1.55, data["overview"], 15, False, th["muted"])
+    textbox(s, .78, 6.35, 6.8, .3, "Created with Usman AI Presentation Studio", 11, True, th["accent"])
+    notes(s, "Opening slide. Introduce the topic and explain what the audience will learn.")
+
+    total = len(data["slides"]) + 1
+    for num, d in enumerate(data["slides"], 2):
+        s = prs.slides.add_slide(prs.slide_layouts[6])
+        bg(s, th)
+        line = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(.62), Inches(1.0), Inches(.08), Inches(4.9))
+        line.fill.solid(); line.fill.fore_color.rgb = rgb(th["accent"]); line.line.fill.background()
+
+        textbox(s, .95, .68, 7.1, .65, d["title"], 26, True, th["text"])
+        if d.get("subtitle"):
+            textbox(s, .97, 1.34, 7.0, .42, d["subtitle"], 11, False, th["accent2"])
+
+        # Content panel
+        card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.95), Inches(1.95), Inches(7.05), Inches(4.65))
+        card.fill.solid(); card.fill.fore_color.rgb = rgb(th["card"]); card.line.fill.background()
+        y = 2.28
+        for bullet in d.get("bullets", [])[:6]:
+            dot = s.shapes.add_shape(MSO_SHAPE.OVAL, Inches(1.25), Inches(y+.06), Inches(.13), Inches(.13))
+            dot.fill.solid(); dot.fill.fore_color.rgb = rgb(th["accent"]); dot.line.fill.background()
+            textbox(s, 1.55, y, 6.05, .62, bullet, 15, False, th["text"])
+            y += .70
+
+        # Topic-wise AI image
+        image_index = num - 1
+        add_image_to_slide(s, images[image_index] if image_index < len(images) else None, 8.35, 1.95, 4.15, 4.65, th)
+        textbox(s, .65, 7.05, 10.7, .22, "Usman AI Presentation Studio", 8, False, th["muted"])
+        textbox(s, 11.65, 7.02, 1, .25, f"{num}/{total}", 9, False, th["muted"], PP_ALIGN.RIGHT)
+        notes(s, d.get("speaker_notes", ""))
+
+    out = io.BytesIO()
+    prs.save(out)
+    return out.getvalue()
 
 
 def css(theme):
@@ -135,11 +263,17 @@ def css(theme):
 
 if "data" not in st.session_state: st.session_state.data=None
 if "ppt" not in st.session_state: st.session_state.ppt=None
+if "images" not in st.session_state: st.session_state.images=[]
 
 with st.sidebar:
     st.markdown('<div class="brand"><div class="brand-title">🎤 Usman AI</div><div class="brand-sub">Presentation Studio</div></div>',unsafe_allow_html=True)
     st.markdown("---")
     theme=st.selectbox("🎨 Visual Theme",list(THEMES.keys()))
+    st.markdown("---")
+    st.markdown("### 🖼️ AI Slide Images")
+    use_images = st.checkbox("Generate topic-wise AI image for every slide", value=True)
+    if use_images:
+        st.caption("Uses Pollinations AI image generation. Add POLLINATIONS_API_KEY to Streamlit Secrets.")
     st.markdown("---")
     st.markdown("### 💡 Workflow")
     st.markdown("**1. Define** → **2. Generate** → **3. Review** → **4. Download**")
@@ -174,6 +308,12 @@ with right:
             for i,s in enumerate(d["slides"],1):
                 st.markdown(f"**Slide {i}: {s['title']}**")
                 for bullet in s["bullets"]: st.markdown(f"- {bullet}")
+        if st.session_state.images:
+            with st.expander("🖼️ Preview Topic-wise AI Images", expanded=False):
+                for idx, image in enumerate(st.session_state.images, start=1):
+                    if image:
+                        st.image(image, caption=f"Slide {idx} image", use_container_width=True)
+
         if st.session_state.ppt:
             st.download_button("📥 Download Editable PowerPoint (.pptx)",st.session_state.ppt,"usman_ai_presentation.pptx","application/vnd.openxmlformats-officedocument.presentationml.presentation",use_container_width=True)
     else: st.info("Your generated presentation will appear here. Fill in the requirements and click Generate Presentation.")
@@ -184,8 +324,12 @@ if go:
         with st.spinner("🤖 Creating your presentation..."):
             try:
                 d=generate(topic.strip(),language,count,ptype,audience,visual,extra.strip())
-                st.session_state.data=d; st.session_state.ppt=make_ppt(d,visual)
-                st.success("🎉 Presentation generated successfully!"); st.rerun()
+                images = generate_all_images(d, topic.strip(), visual) if use_images else []
+                st.session_state.data=d
+                st.session_state.images=images
+                st.session_state.ppt=make_ppt(d,visual,images)
+                st.success("🎉 Presentation and topic-wise images generated successfully!")
+                st.rerun()
             except Exception as e: st.error(f"Could not generate presentation: {e}")
 
 st.markdown("---")
