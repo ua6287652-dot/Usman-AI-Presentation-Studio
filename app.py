@@ -57,8 +57,12 @@ def schema(n):
     return {"type":"object","additionalProperties":False,"properties":{
         "presentation_title":{"type":"string"},"subtitle":{"type":"string"},"overview":{"type":"string"},
         "slides":{"type":"array","minItems":n,"maxItems":n,"items":{"type":"object","additionalProperties":False,
-            "properties":{"title":{"type":"string"},"subtitle":{"type":"string"},"bullets":{"type":"array","minItems":2,"maxItems":6,"items":{"type":"string"}},"explanation":{"type":"string"},"speaker_notes":{"type":"string"}},
-            "required":["title","subtitle","bullets","explanation","speaker_notes"]}},
+            "properties":{"title":{"type":"string"},"subtitle":{"type":"string"},
+                "points":{"type":"array","minItems":3,"maxItems":3,"items":{"type":"object","additionalProperties":False,
+                    "properties":{"point":{"type":"string"},"explanation":{"type":"string"}},
+                    "required":["point","explanation"]}},
+                "speaker_notes":{"type":"string"}},
+            "required":["title","subtitle","points","speaker_notes"]}},
     },"required":["presentation_title","subtitle","overview","slides"]}
 
 
@@ -67,7 +71,7 @@ def generate(topic, language, count, ptype, audience, theme, extra):
     key=api_key()
     if not key: raise RuntimeError("GROQ_API_KEY is missing. Add it in Streamlit Cloud → Settings → Secrets.")
     client=Groq(api_key=key)
-    prompt=f"""Create a professional presentation. Topic: {topic}. Language: {language}. Total PowerPoint slides including the title slide: {count}. The AI content slides to generate are exactly {content_count}. Type: {ptype}. Audience: {audience}. Visual theme: {theme}. Extra instructions: {extra or 'None'}. Return exactly {content_count} content slides. The application will use the first slide as the title slide, so the final PowerPoint must contain exactly {count} slides. Make the flow logical from introduction/context through main content to conclusion. Every slide needs a concise title, optional subtitle, 2-6 useful bullets, a clear 2-4 sentence explanation that expands on the main points, and speaker notes. Keep bullets concise enough for PowerPoint. The explanation must directly explain the slide topic and should add useful context, examples, or meaning rather than repeating the bullets. Adapt depth to the audience. Use the requested language. Do not invent statistics, citations, or sources. Do not use markdown fences."""
+    prompt=f"""Create a professional presentation. Topic: {topic}. Language: {language}. Total PowerPoint slides including the title slide: {count}. The AI content slides to generate are exactly {content_count}. Type: {ptype}. Audience: {audience}. Visual theme: {theme}. Extra instructions: {extra or 'None'}. Return exactly {content_count} content slides. The application will use the first slide as the title slide, so the final PowerPoint must contain exactly {count} slides. Make the flow logical from introduction/context through main content to conclusion. Every content slide must have a concise title, optional subtitle, EXACTLY 3 main points, and speaker notes. IMPORTANT: each of the 3 main points must be a separate object with its own point title and its own explanation. Write a separate, specific explanation of about 3-4 displayed lines (normally 2-3 clear sentences) directly for that point only. Never create one combined explanation for the whole slide. The explanation must clarify its own point with useful context or an example. Keep point titles concise. Adapt depth to the audience. Use the requested language. Do not invent statistics, citations, or sources. Do not use markdown fences."""
     res=client.chat.completions.create(
         model=MODEL,
         messages=[
@@ -141,7 +145,7 @@ def generate_all_images(data: Dict[str, Any], topic: str, theme_name: str) -> Li
             make_image_prompt(
                 slide.get("title", ""),
                 slide.get("subtitle", ""),
-                slide.get("bullets", []),
+                [item.get("point", "") for item in slide.get("points", [])],
                 topic,
                 theme_name,
             )
@@ -223,25 +227,22 @@ def make_ppt(data, theme_name, images: Optional[List[Optional[bytes]]] = None):
         if d.get("subtitle"):
             textbox(s, .97, 1.34, 7.0, .42, d["subtitle"], 11, False, th["accent2"])
 
-        # Content panel: main points + explanation
+        # Each main point is immediately followed by its own explanation.
         card = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(.95), Inches(1.95), Inches(7.05), Inches(4.65))
         card.fill.solid(); card.fill.fore_color.rgb = rgb(th["card"]); card.line.fill.background()
-        textbox(s, 1.25, 2.14, 6.2, .28, "MAIN POINTS", 9, True, th["accent2"])
-        bullets = d.get("bullets", [])[:6]
-        bullet_font = 13 if len(bullets) >= 5 else 14
-        y = 2.48
-        for bullet in bullets:
-            dot = s.shapes.add_shape(MSO_SHAPE.OVAL, Inches(1.25), Inches(y+.05), Inches(.11), Inches(.11))
-            dot.fill.solid(); dot.fill.fore_color.rgb = rgb(th["accent"]); dot.line.fill.background()
-            textbox(s, 1.50, y, 6.05, .48, bullet, bullet_font, False, th["text"])
-            y += .52 if len(bullets) >= 5 else .55
-
-        # Explanation section
-        exp_top = 5.48 if len(bullets) >= 5 else 5.35
-        exp_box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(1.18), Inches(exp_top), Inches(6.48), Inches(.88))
-        exp_box.fill.solid(); exp_box.fill.fore_color.rgb = rgb(th["panel"]); exp_box.line.color.rgb = rgb(th["accent2"])
-        textbox(s, 1.38, exp_top + .10, 1.35, .22, "EXPLANATION", 8, True, th["accent2"])
-        textbox(s, 1.38, exp_top + .31, 6.0, .48, d.get("explanation", ""), 10.5, False, th["muted"])
+        textbox(s, 1.25, 2.10, 6.2, .24, "KEY POINTS & EXPLANATIONS", 9, True, th["accent2"])
+        points = d.get("points", [])[:3]
+        if not points:
+            # Compatibility with any older session data generated before this update.
+            points = [{"point": x, "explanation": ""} for x in d.get("bullets", [])[:3]]
+        block_h = 1.30
+        y = 2.42
+        for idx, item in enumerate(points):
+            point_title = item.get("point", "")
+            point_explanation = item.get("explanation", "")
+            textbox(s, 1.27, y, 6.35, .30, f"{idx + 1}. {point_title}", 12, True, th["text"])
+            textbox(s, 1.50, y + .32, 6.05, .78, point_explanation, 9.5, False, th["muted"])
+            y += block_h
 
         # Topic-wise AI image
         image_index = num - 1
@@ -317,9 +318,17 @@ with right:
         with st.expander("📑 View Slide Outline",expanded=True):
             for i,s in enumerate(d["slides"],1):
                 st.markdown(f"**Slide {i}: {s['title']}**")
-                for bullet in s["bullets"]: st.markdown(f"- {bullet}")
-                if s.get("explanation"):
-                    st.markdown(f"**Explanation:** {s['explanation']}")
+                points = s.get("points", [])
+                if points:
+                    for item in points:
+                        st.markdown(f"- **{item['point']}**")
+                        st.markdown(f"  **Explanation:** {item['explanation']}")
+                else:
+                    # Older saved session data fallback
+                    for bullet in s.get("bullets", []):
+                        st.markdown(f"- {bullet}")
+                    if s.get("explanation"):
+                        st.markdown(f"**Explanation:** {s['explanation']}")
         if st.session_state.images:
             with st.expander("🖼️ Preview Topic-wise AI Images", expanded=False):
                 for idx, image in enumerate(st.session_state.images, start=1):
